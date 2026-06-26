@@ -221,7 +221,7 @@ __marimo__/
 data/
 
 # 모델 가중치
-outputs/
+output/
 *.pt
 *.pth
 *.ckpt
