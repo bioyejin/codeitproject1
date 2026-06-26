@@ -216,3 +216,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 데이터
+data/
+
+# 모델 가중치
+outputs/
+*.pt
+*.pth
+*.ckpt
+
+# 주피터
+.ipynb_checkpoints/
+*.ipynb
+
+# 파이썬
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# 기타
+*.zip
+*.tar.gz
