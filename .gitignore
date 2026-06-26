@@ -236,6 +236,10 @@ __pycache__/
 *.pyo
 .env
 
+# 테스트 파일
+test/
+test_*.py
+
 # 기타
 *.zip
 *.tar.gz
