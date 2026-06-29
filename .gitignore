@@ -243,3 +243,4 @@ test_*.py
 # 기타
 *.zip
 *.tar.gz
+*.pkl
