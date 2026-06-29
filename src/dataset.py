@@ -21,36 +21,110 @@ def download_data():
     return path
 
 
+def apply_corrections(annotations, corrections_path='corrections.json'):
+    """
+    corrections.json을 적용하여 annotation을 수정/추가합니다.
+
+    Args:
+        annotations (dict): 파일명 → bbox 리스트 딕셔너리
+        corrections_path (str): corrections.json 경로
+
+    Returns:
+        dict: 수정된 annotations
+    """
+    if not os.path.exists(corrections_path):
+        print("corrections.json 없음. 원본 데이터 사용")
+        return annotations
+
+    with open(corrections_path, 'r', encoding='utf-8') as f:
+        corrections = json.load(f)
+
+    # ann_id → (file_name, idx) 역매핑 생성
+    ann_id_map = {}  # ann_id → {'file_name': ..., 'idx': ...}
+    json_files = glob.glob(
+        os.path.join(os.path.dirname(corrections_path), '**', '*.json'),
+        recursive=True
+    )
+
+    # 원본 json에서 ann_id → file_name 매핑
+    all_ann_id_map = {}
+    for jf in json_files:
+        with open(jf, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        file_name = data['images'][0]['file_name']
+        ann = data['annotations'][0]
+        all_ann_id_map[ann['id']] = {
+            'file_name': file_name,
+            'bbox': ann['bbox'],
+            'category_id': ann['category_id']
+        }
+
+    # 1. 좌표 수정
+    for corr in corrections['bbox_corrections']:
+        ann_id = corr['ann_id']
+        if ann_id in all_ann_id_map:
+            file_name = all_ann_id_map[ann_id]['file_name']
+            category_id = all_ann_id_map[ann_id]['category_id']
+            original = corr['original']
+            corrected = corr['corrected']
+
+            if file_name in annotations:
+                for ann in annotations[file_name]:
+                    if ann['bbox'] == original and ann['category_id'] == category_id:
+                        ann['bbox'] = corrected
+                        print(f"✅ 수정 - ann_id {ann_id}: {original} → {corrected}")
+                        break
+
+    # 2. bbox 추가
+    for add in corrections['bbox_additions']:
+        file_name = add['file_name']
+        new_ann = {
+            'bbox': add['bbox'],
+            'category_id': add['category_id']
+        }
+        if file_name in annotations:
+            annotations[file_name].append(new_ann)
+        else:
+            annotations[file_name] = [new_ann]
+        print(f"✅ 추가 - {file_name}: {add['bbox']}")
+
+    return annotations
+
+
 class PillDataset(Dataset):
-    def __init__(self, path, transform=None):
+    def __init__(self, path, transform=None, corrections_path='corrections.json'):
         """
         Args:
             path (str): 데이터 루트 경로 (download_data()의 반환값)
             transform: 이미지 증강/변환 (없으면 None)
+            corrections_path (str): corrections.json 경로
         """
         self.train_img_dir = os.path.join(path, 'sprint_ai_project1_data', 'train_images')
         self.transform = transform
-        
+
         # 이미지별 annotation 수집
         json_files = glob.glob(
             os.path.join(path, 'sprint_ai_project1_data', 'train_annotations', '**', '*.json'),
             recursive=True
         )
-        
+
         self.annotations = {}  # 파일명 → bbox 리스트
         for jf in json_files:
             with open(jf, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-            
+
             file_name = data['images'][0]['file_name']
             if file_name not in self.annotations:
                 self.annotations[file_name] = []
-            
+
             self.annotations[file_name].append({
-                'bbox': data['annotations'][0]['bbox'],        # [x, y, w, h]
+                'bbox': data['annotations'][0]['bbox'],
                 'category_id': data['annotations'][0]['category_id']
             })
-        
+
+        # corrections.json 적용
+        self.annotations = apply_corrections(self.annotations, corrections_path)
+
         self.image_names = list(self.annotations.keys())
 
     def __len__(self):
