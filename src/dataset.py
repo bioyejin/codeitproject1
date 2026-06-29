@@ -21,13 +21,14 @@ def download_data():
     return path
 
 
-def apply_corrections(annotations, corrections_path='corrections.json'):
+def apply_corrections(annotations, corrections_path='corrections.json', data_path=None):
     """
     corrections.json을 적용하여 annotation을 수정/추가합니다.
 
     Args:
         annotations (dict): 파일명 → bbox 리스트 딕셔너리
         corrections_path (str): corrections.json 경로
+        data_path (str): kagglehub 데이터 루트 경로 (download_data()의 반환값)
 
     Returns:
         dict: 수정된 annotations
@@ -36,13 +37,16 @@ def apply_corrections(annotations, corrections_path='corrections.json'):
         print("corrections.json 없음. 원본 데이터 사용")
         return annotations
 
+    if data_path is None:
+        print("data_path 없음. corrections 적용 불가")
+        return annotations
+
     with open(corrections_path, 'r', encoding='utf-8') as f:
         corrections = json.load(f)
 
-    # ann_id → (file_name, idx) 역매핑 생성
-    ann_id_map = {}  # ann_id → {'file_name': ..., 'idx': ...}
+    # train_annotations 폴더 탐색
     json_files = glob.glob(
-        os.path.join(os.path.dirname(corrections_path), '**', '*.json'),
+        os.path.join(data_path, 'sprint_ai_project1_data', 'train_annotations', '**', '*.json'),
         recursive=True
     )
 
@@ -92,7 +96,7 @@ def apply_corrections(annotations, corrections_path='corrections.json'):
 
 
 class PillDataset(Dataset):
-    def __init__(self, path, transform=None, corrections_path='corrections.json'):
+    def __init__(self, path, transform=None, corrections_path='corrections.json', unique_only=True):
         """
         Args:
             path (str): 데이터 루트 경로 (download_data()의 반환값)
@@ -123,9 +127,28 @@ class PillDataset(Dataset):
             })
 
         # corrections.json 적용
-        self.annotations = apply_corrections(self.annotations, corrections_path)
+        self.annotations = apply_corrections(self.annotations, corrections_path, data_path=path)
 
-        self.image_names = list(self.annotations.keys())
+        # unique_only 적용
+        if unique_only:
+            # 파일명에서 구성 코드 추출 후 구성당 가장 낮은 위도 1장만 유지
+            from collections import defaultdict
+            group_files = defaultdict(list)
+            for file_name in self.annotations.keys():
+                group = '_'.join(file_name.split('_')[:5])
+                # 위도값 추출 (파일명의 6번째 요소)
+                camera_la = int(file_name.split('_')[5])
+                group_files[group].append((camera_la, file_name))
+    
+            # 각 구성에서 가장 낮은 위도 이미지 1장만 선택
+            unique_image_names = []
+            for group, files in group_files.items():
+                files.sort(key=lambda x: x[0])  # 위도 기준 오름차순 정렬
+                unique_image_names.append(files[0][1])  # 가장 낮은 위도 선택
+    
+            self.image_names = unique_image_names
+        else:
+            self.image_names = list(self.annotations.keys())
 
     def __len__(self):
         """데이터셋 크기를 반환합니다."""
@@ -197,7 +220,7 @@ def get_transform(train=True):
         ])
 
 
-def get_dataloader(path, batch_size=4, train=True, shuffle=None):
+def get_dataloader(path, batch_size=4, train=True, shuffle=None, unique_only=True):
     """
     DataLoader를 생성합니다.
     
@@ -214,7 +237,7 @@ def get_dataloader(path, batch_size=4, train=True, shuffle=None):
         shuffle = train  # 학습용이면 shuffle, 검증용이면 안 함
     
     transform = get_transform(train=train)
-    dataset = PillDataset(path, transform=transform)
+    dataset = PillDataset(path, transform=transform, unique_only=unique_only)
     
     return DataLoader(
         dataset,
