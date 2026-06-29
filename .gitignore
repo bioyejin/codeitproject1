@@ -244,3 +244,4 @@ test_*.py
 *.zip
 *.tar.gz
 *.pkl
+setup.sh
