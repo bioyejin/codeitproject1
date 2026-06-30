@@ -101,9 +101,8 @@ class SwinDetrWrapper(nn.Module):
         # timm Swin-T 출력 형식: NHWC (B,H,W,C)
         # DETR의 input_projection(Conv2d)은 NCHW (B,C,H,W) 기대 → permute 래퍼로 변환
         #
-        # transformers 버전별 timm 모델 경로가 다름:
-        #   5.x: backbone = DetrConvEncoder  → .model        = FeatureListNet
-        #   4.x: backbone = DetrConvModel    → .body.model   = FeatureListNet
+        # transformers 버전마다 FeatureListNet 경로가 다르므로 경로 하드코딩 대신
+        # timm 1.0+ 의 output_fmt=NHWC 속성으로 FeatureListNet을 직접 탐색해 교체.
         class _SwinExtractor(nn.Module):
             def __init__(self, m):
                 super().__init__()
@@ -111,19 +110,28 @@ class SwinDetrWrapper(nn.Module):
             def forward(self, x):
                 return [f.permute(0, 3, 1, 2).contiguous() for f in self.m(x)]
 
-        try:
-            # transformers 5.x: DetrConvEncoder 에는 .model 이 있음
-            container = self.model.model.backbone
-            feat_list = container.model
-            container.model = _SwinExtractor(feat_list)
-        except AttributeError:
-            # transformers 4.x: DetrConvModel 에는 .body (TimmBackbone) → .model
-            container = self.model.model.backbone.body
-            feat_list = container.model
-            container.model = _SwinExtractor(feat_list)
+        _feat_mod = _feat_parent = _feat_attr = None
+        for _full_name, _mod in self.model.named_modules():
+            if 'NHWC' in str(getattr(_mod, 'output_fmt', '')):
+                _parts = _full_name.split('.')
+                _parent = self.model
+                for _p in _parts[:-1]:
+                    _parent = getattr(_parent, _p)
+                _feat_mod, _feat_parent, _feat_attr = _mod, _parent, _parts[-1]
+                break
+
+        if _feat_mod is None:
+            raise RuntimeError(
+                f"timm FeatureListNet(NHWC) not found. "
+                f"backbone={type(self.model.model.backbone).__name__}, "
+                f"transformers={__import__('transformers').__version__}, "
+                f"timm={__import__('timm').__version__}"
+            )
+
+        setattr(_feat_parent, _feat_attr, _SwinExtractor(_feat_mod))
 
         if freeze_backbone:
-            for param in feat_list.parameters():
+            for param in _feat_mod.parameters():
                 param.requires_grad = False
 
     def _to_detr_targets(self, targets, H, W):
