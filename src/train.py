@@ -5,12 +5,23 @@ import numpy as np
 import torch
 import random
 from torch.utils.data import Subset
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR
 from sklearn.model_selection import GroupKFold
 from tqdm import tqdm
 from torchmetrics.detection import MeanAveragePrecision
 
-from src.dataset import download_data, PillDataset, get_transform, collate_fn_list, collate_fn_stack, coco_to_xyxy
+from src.dataset import download_data, PillDataset, collate_fn_list, collate_fn_stack, coco_to_xyxy
+
+def prepare_targets(targets, device, box_format):
+    """targets를 device로 이동하고, box_format에 따라 bbox를 변환합니다."""
+    if box_format == 'xyxy':
+        return [
+            {'boxes': coco_to_xyxy(t['boxes']).to(device), 'labels': t['labels'].to(device)}
+            for t in targets
+        ]
+    return [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+
 from src.model import get_model
 from src.utils import get_groups, set_seed, save_checkpoint, plot_history, load_checkpoint, get_category_names
 
@@ -35,9 +46,9 @@ def load_data(unique_only=True, batch_size=4, collate='stack', seed=42):
     path = download_data()
     print(f"데이터 경로: {path}")
 
-    # 2. 전체 데이터셋 생성 (train transform 기준으로 일단 생성)
-    full_dataset = PillDataset(path, transform=get_transform(train=True), unique_only=unique_only)
-    val_full_dataset = PillDataset(path, transform=get_transform(train=False), unique_only=unique_only)
+    # 2. 전체 데이터셋 생성
+    full_dataset = PillDataset(path, train=True, unique_only=unique_only)
+    val_full_dataset = PillDataset(path, train=False, unique_only=unique_only)
     print(f"전체 이미지 수: {len(full_dataset)}")
 
     label_to_category_id = full_dataset.label_to_category_id
@@ -100,8 +111,8 @@ def load_data_kfold(unique_only=True, batch_size=4, n_splits=5, collate='stack',
     path = download_data()
     print(f"데이터 경로: {path}")
 
-    full_dataset = PillDataset(path, transform=get_transform(train=True), unique_only=unique_only)
-    val_full_dataset = PillDataset(path, transform=get_transform(train=False), unique_only=unique_only)
+    full_dataset = PillDataset(path, train=True, unique_only=unique_only)
+    val_full_dataset = PillDataset(path, train=False, unique_only=unique_only)
     print(f"전체 이미지 수: {len(full_dataset)}")
 
     label_to_category_id = full_dataset.label_to_category_id
@@ -144,46 +155,47 @@ def load_data_kfold(unique_only=True, batch_size=4, n_splits=5, collate='stack',
     return path, fold_loaders, label_to_category_id
 
 
-def get_optimizer_and_scheduler(model, lr=1e-4, warmup_epochs=0, total_epochs=20, steps_per_epoch=1):
+def get_optimizer_and_scheduler(model, lr=1e-4, weight_decay=1e-4, warmup=False, total_epochs=20, steps_per_epoch=1):
     """
     옵티마이저와 scheduler를 생성합니다.
-    warmup_epochs가 0이면 CosineAnnealingLR만 epoch 단위로 적용합니다(B안).
-    warmup_epochs가 0보다 크면 LinearLR(warmup) + CosineAnnealingLR을 step 단위로 적용합니다(A안).
+
+    warmup=True:
+        - 첫 epoch: LinearLR로 lr*0.01 → lr 선형 증가 (step 단위)
+        - 이후 epoch: CosineAnnealingLR epoch 단위
+        - CosineAnnealingLR은 warmup epoch 완료 후 train_model 내부에서 생성합니다.
+          (PyTorch scheduler는 생성 시 step()을 즉시 호출하므로,
+           동시 생성하면 CosineAnnealingLR이 LR을 lr로 덮어써 warmup이 망가집니다.)
+    warmup=False:
+        - 처음부터 CosineAnnealingLR epoch 단위
 
     Args:
         model: 학습할 모델
         lr (float): 기본 learning rate
-        warmup_epochs (int): warmup 적용할 epoch 수 (0이면 미적용)
+        weight_decay (float): AdamW weight decay
+        warmup (bool): 첫 epoch warmup 적용 여부
         total_epochs (int): 전체 epoch 수
-        steps_per_epoch (int): 한 epoch당 step(batch) 수
+        steps_per_epoch (int): 한 epoch당 step(batch) 수 (warmup 시 사용)
 
     Returns:
-        optimizer, scheduler, scheduler_unit (str): 'epoch' 또는 'step'
+        optimizer, warmup_scheduler, main_scheduler
+        warmup_scheduler: 첫 epoch step 단위용 (warmup=False면 None)
+        main_scheduler:   epoch 단위 CosineAnnealingLR (warmup=True면 None, train_model 내부에서 생성)
     """
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
 
-    if warmup_epochs == 0:
-        scheduler = CosineAnnealingLR(optimizer, T_max=total_epochs)
-        scheduler_unit = 'epoch'
+    if warmup:
+        # 생성 즉시 LR = lr * 0.01로 설정됨
+        warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=steps_per_epoch)
+        main_scheduler = None  # train_model 내부에서 warmup 완료 후 생성
     else:
-        warmup_steps = warmup_epochs * steps_per_epoch
-        total_steps = total_epochs * steps_per_epoch
+        warmup_scheduler = None
+        main_scheduler = CosineAnnealingLR(optimizer, T_max=total_epochs)
 
-        warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=warmup_steps)
-        main_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps)
-
-        scheduler = SequentialLR(
-            optimizer,
-            schedulers=[warmup_scheduler, main_scheduler],
-            milestones=[warmup_steps]
-        )
-        scheduler_unit = 'step'
-
-    return optimizer, scheduler, scheduler_unit
+    return optimizer, warmup_scheduler, main_scheduler
 
 
-def train_one_epoch(model, train_loader, optimizer, scheduler, scheduler_unit, device, box_format='xyxy'):
+def train_one_epoch(model, train_loader, optimizer, device, box_format='xyxy', step_scheduler=None):
     """
     한 epoch 동안 모델을 학습시킵니다.
 
@@ -191,11 +203,9 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scheduler_unit, d
         model: 학습할 모델
         train_loader: 학습 DataLoader
         optimizer: 옵티마이저
-        scheduler: 학습률 스케줄러
-        scheduler_unit (str): 'epoch' 또는 'step' - step이면 배치마다 scheduler.step() 호출
         device: 'cuda' or 'cpu'
-        box_format (str): 'xyxy'면 COCO[x,y,w,h]를 [x1,y1,x2,y2]로 변환 (FasterRCNN용)
-                        'coco'면 변환 없이 그대로 사용 (DETR 계열 등 자체 변환하는 모델용)
+        box_format (str): 'xyxy'면 COCO bbox를 [x1,y1,x2,y2]로 변환, 'coco'면 그대로
+        step_scheduler: 배치마다 step()할 scheduler (warmup epoch에만 전달, 나머지는 None)
 
     Returns:
         float: epoch 평균 손실
@@ -205,14 +215,7 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scheduler_unit, d
 
     for images, targets in tqdm(train_loader, desc="Training"):
         images = [img.to(device) for img in images]
-
-        if box_format == 'xyxy':
-            targets = [
-                {'boxes': coco_to_xyxy(t['boxes']).to(device), 'labels': t['labels'].to(device)}
-                for t in targets
-            ]
-        else:
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        targets = prepare_targets(targets, device, box_format)
 
         loss_dict = model(images, targets)
         loss = sum(loss_dict.values())
@@ -221,15 +224,15 @@ def train_one_epoch(model, train_loader, optimizer, scheduler, scheduler_unit, d
         loss.backward()
         optimizer.step()
 
-        if scheduler_unit == 'step':
-            scheduler.step()
+        if step_scheduler is not None:
+            step_scheduler.step()
 
         total_loss += loss.item()
 
     return total_loss / len(train_loader)
 
 
-def evaluate(model, val_loader, device, box_format='xyxy'):
+def evaluate(model, val_loader, device):
     """
     검증 데이터셋에 대해 mAP를 계산합니다.
     표준 mAP@0.5:0.95, mAP@0.5와 함께
@@ -239,7 +242,6 @@ def evaluate(model, val_loader, device, box_format='xyxy'):
         model: 평가할 모델
         val_loader: 검증 DataLoader
         device: 'cuda' or 'cpu'
-        box_format (str): 'xyxy' 또는 'coco' - train_one_epoch과 동일한 의미
 
     Returns:
         dict: {'map', 'map_50', 'map_75_95', 'map_per_class', ...}
@@ -254,17 +256,15 @@ def evaluate(model, val_loader, device, box_format='xyxy'):
         for images, targets in tqdm(val_loader, desc="Validating"):
             images = [img.to(device) for img in images]
 
-            if box_format == 'xyxy':
-                targets = [
-                    {'boxes': coco_to_xyxy(t['boxes']).to(device), 'labels': t['labels'].to(device)}
-                    for t in targets
-                ]
-            else:
-                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            # torchmetrics는 항상 xyxy 형식을 기대하므로 box_format과 무관하게 변환
+            metric_targets = [
+                {'boxes': coco_to_xyxy(t['boxes']).to(device), 'labels': t['labels'].to(device)}
+                for t in targets
+            ]
 
             preds = model(images)
-            metric_standard.update(preds, targets)
-            metric_strict.update(preds, targets)
+            metric_standard.update(preds, metric_targets)
+            metric_strict.update(preds, metric_targets)
 
     result_standard = metric_standard.compute()
     result_strict = metric_strict.compute()
@@ -273,47 +273,67 @@ def evaluate(model, val_loader, device, box_format='xyxy'):
         'map': result_standard['map'].item(),
         'map_50': result_standard['map_50'].item(),
         'map_per_class': result_standard.get('map_per_class'),
-        'map_75_95': result_strict['map'].item(),   # ← 비교 기준 지표
+        'classes': result_standard.get('classes'),
+        'map_75_95': result_strict['map'].item(),
     }
 
 
-def train_model(model, train_loader, val_loader, optimizer, scheduler, scheduler_unit, device, epochs, save_path, box_format='xyxy'):
+def train_model(model, train_loader, val_loader, optimizer, warmup_scheduler, main_scheduler, device, epochs, save_path, box_format='xyxy'):
     """
     여러 epoch을 학습시키고 history를 기록하며, val mAP 기준 best model을 저장합니다.
+
+    LR 스케줄 흐름:
+        warmup_scheduler가 있는 경우 (warmup=True):
+            - epoch 1: LinearLR step 단위 warmup → lr*0.01 에서 lr까지 선형 증가
+            - epoch 2~: CosineAnnealingLR(T_max=epochs-1) epoch 단위
+            - CosineAnnealingLR은 warmup 완료 직후 내부에서 생성 (LR 충돌 방지)
+        warmup_scheduler가 없는 경우 (warmup=False):
+            - epoch 1~: CosineAnnealingLR(T_max=epochs) epoch 단위
 
     Args:
         model: 학습할 모델
         train_loader, val_loader: DataLoader
-        optimizer, scheduler: 옵티마이저와 스케줄러
-        scheduler_unit (str): 'epoch' 또는 'step'
+        optimizer: 옵티마이저
+        warmup_scheduler: 첫 epoch step 단위 warmup용 (없으면 None)
+        main_scheduler: epoch 단위 CosineAnnealingLR (warmup=True면 None으로 전달)
         device: 'cuda' or 'cpu'
         epochs (int): 학습 epoch 수
         save_path (str): best model 저장 경로
+        box_format (str): 'xyxy' 또는 'coco'
 
     Returns:
-        dict: {'train_loss': [...], 'val_map': [...], 'val_map_50': [...]}
+        dict: {'train_loss': [...], 'val_map': [...], 'val_map_50': [...], 'val_map_75_95': [...]}
     """
     history = {'train_loss': [], 'val_map': [], 'val_map_50': [], 'val_map_75_95': []}
     best_map = -1.0
 
     for epoch in range(epochs):
-        train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, scheduler_unit, device, box_format=box_format)
+        is_warmup_epoch = (epoch == 0 and warmup_scheduler is not None)
 
+        train_loss = train_one_epoch(
+            model, train_loader, optimizer, device,
+            box_format=box_format,
+            step_scheduler=warmup_scheduler if is_warmup_epoch else None
+        )
 
-        if scheduler_unit == 'epoch':
-            scheduler.step()
+        if is_warmup_epoch:
+            # warmup 완료 시점: LR = lr (LinearLR이 lr까지 올림)
+            # 이 시점에 생성해야 CosineAnnealingLR init step()이 LR을 lr로 세팅 → 충돌 없음
+            main_scheduler = CosineAnnealingLR(optimizer, T_max=epochs - 1)
+        else:
+            main_scheduler.step()
 
-        result = evaluate(model, val_loader, device, box_format=box_format)
+        result = evaluate(model, val_loader, device)
 
         history['train_loss'].append(train_loss)
         history['val_map'].append(result['map'])
         history['val_map_50'].append(result['map_50'])
         history['val_map_75_95'].append(result['map_75_95'])
 
-        if result['map_75_95'] > best_map:   # ← 비교 기준을 0.75:0.95로 변경
+        if result['map_75_95'] > best_map:
             best_map = result['map_75_95']
             save_checkpoint(model, save_path)
-            marker = "   🌟 Best mAP@0.75:0.95"
+            marker = "   [Best] mAP@0.75:0.95"
         else:
             marker = ""
 
@@ -322,51 +342,12 @@ def train_model(model, train_loader, val_loader, optimizer, scheduler, scheduler
     return history
 
 
-def evaluate_per_class(model, val_loader, device, box_format='xyxy'):
-    """
-    검증 데이터셋에 대해 클래스별 mAP를 계산합니다.
-    (best model을 불러온 뒤 한 번만 호출하는 용도)
-
-    Args:
-        model: 평가할 모델 (best checkpoint 로드된 상태)
-        val_loader: 검증 DataLoader
-        device: 'cuda' or 'cpu'
-        box_format (str): 'xyxy' 또는 'coco'
-
-    Returns:
-        dict: {'classes': tensor, 'map_per_class': tensor}
-    """
-    model.eval()
-    metric = MeanAveragePrecision(class_metrics=True)
-
-    with torch.no_grad():
-        for images, targets in tqdm(val_loader, desc="Evaluating per-class"):
-            images = [img.to(device) for img in images]
-
-            if box_format == 'xyxy':
-                targets = [
-                    {'boxes': coco_to_xyxy(t['boxes']).to(device), 'labels': t['labels'].to(device)}
-                    for t in targets
-                ]
-            else:
-                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-            preds = model(images)
-            metric.update(preds, targets)
-
-    result = metric.compute()
-    return {
-        'classes': result['classes'],
-        'map_per_class': result['map_per_class'],
-    }
-
-
 def load_config(path):
     with open(path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
 
 
-def run_kfold(config_path, max_folds=None):
+def run_kfold(config_path, max_folds=None, override_epochs=None):
     """
     config.yaml을 불러와 K-Fold 전체를 학습하고, fold별 결과를 종합합니다.
 
@@ -378,6 +359,8 @@ def run_kfold(config_path, max_folds=None):
         list: 각 fold의 Best mAP@0.75:0.95 리스트
     """
     config = load_config(config_path)
+    if override_epochs is not None:
+        config['train']['epochs'] = override_epochs
     set_seed(config['train']['seed'])
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -409,10 +392,11 @@ def run_kfold(config_path, max_folds=None):
             freeze_backbone=config['model']['freeze_backbone']
         ).to(device)
 
-        optimizer, scheduler, scheduler_unit = get_optimizer_and_scheduler(
+        optimizer, warmup_scheduler, main_scheduler = get_optimizer_and_scheduler(
             model,
             lr=config['train']['lr'],
-            warmup_epochs=config['train']['warmup_epochs'],
+            weight_decay=config['train']['weight_decay'],
+            warmup=config['train']['warmup'],
             total_epochs=config['train']['epochs'],
             steps_per_epoch=len(train_loader)
         )
@@ -420,7 +404,7 @@ def run_kfold(config_path, max_folds=None):
         save_path = os.path.join(config['output']['save_dir'], f"{model_name}_fold{fold+1}.pt")
 
         history = train_model(
-            model, train_loader, val_loader, optimizer, scheduler, scheduler_unit,
+            model, train_loader, val_loader, optimizer, warmup_scheduler, main_scheduler,
             device, epochs=config['train']['epochs'], save_path=save_path,
             box_format=config['model']['box_format']
         )
@@ -437,13 +421,14 @@ def run_kfold(config_path, max_folds=None):
         ).to(device)
         best_model = load_checkpoint(best_model, save_path, device=device)
 
-        per_class_result = evaluate_per_class(best_model, val_loader, device, box_format=config['model']['box_format'])
+        per_class_result = evaluate(best_model, val_loader, device)
 
         print(f"\n[Fold {fold+1}] 클래스별 mAP (best epoch 기준)")
         for cls, ap in zip(per_class_result['classes'], per_class_result['map_per_class']):
             label = cls.item()         # 모델 출력 라벨 (1~56)
             cat_id = label_to_category_id.get(label)      # 라벨 → 원본 category_id(dl_idx)
-            cls_name = category_map.get(cat_id, '알수없음') if cat_id is not None else '알수없음'
+            cls_name = category_map.get(cat_id, '?') if cat_id is not None else '?'
+            cls_name = cls_name.replace('\xa0', ' ')
             print(f"  {cls_name}({cat_id}): {ap.item():.4f}")
 
         best_map_75_95 = max(history['val_map_75_95'])
@@ -462,6 +447,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True)
     parser.add_argument('--max_folds', type=int, default=None, help='sanity check용: 실행할 fold 수 제한')
+    parser.add_argument('--epochs', type=int, default=None, help='config epochs 덮어쓰기 (sanity check용)')
     args = parser.parse_args()
 
-    run_kfold(args.config, max_folds=args.max_folds)
+    run_kfold(args.config, max_folds=args.max_folds, override_epochs=args.epochs)
