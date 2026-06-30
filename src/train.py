@@ -294,7 +294,7 @@ def train_model(model, train_loader, val_loader, optimizer, scheduler, scheduler
         dict: {'train_loss': [...], 'val_map': [...], 'val_map_50': [...]}
     """
     history = {'train_loss': [], 'val_map': [], 'val_map_50': [], 'val_map_75_95': []}
-    best_map = 0.0
+    best_map = -1.0
 
     for epoch in range(epochs):
         train_loss = train_one_epoch(model, train_loader, optimizer, scheduler, scheduler_unit, device, box_format=box_format)
