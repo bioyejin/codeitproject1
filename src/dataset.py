@@ -1,3 +1,4 @@
+# src/dataset.py
 import kagglehub
 import os
 import json
@@ -150,6 +151,15 @@ class PillDataset(Dataset):
         else:
             self.image_names = list(self.annotations.keys())
 
+        # category_id → 연속된 라벨(1~N) 매핑 생성
+        all_category_ids = sorted(set(
+            ann['category_id']
+            for anns in self.annotations.values()
+            for ann in anns
+        ))
+        self.category_id_to_label = {cat_id: i + 1 for i, cat_id in enumerate(all_category_ids)}  # 0은 배경용으로 비움
+        self.label_to_category_id = {v: k for k, v in self.category_id_to_label.items()}  # 역매핑 (결과 해석용)
+
     def __len__(self):
         """데이터셋 크기를 반환합니다."""
         return len(self.image_names)
@@ -172,8 +182,9 @@ class PillDataset(Dataset):
             [ann['bbox'] for ann in self.annotations[file_name]],
             dtype=torch.float32
         )
+        # category_id를 연속된 라벨로 변환
         labels = torch.tensor(
-            [ann['category_id'] for ann in self.annotations[file_name]],
+            [self.category_id_to_label[ann['category_id']] for ann in self.annotations[file_name]],
             dtype=torch.int64
         )
         
@@ -183,6 +194,21 @@ class PillDataset(Dataset):
             image = self.transform(image)
         
         return image, target
+
+
+def coco_to_xyxy(boxes):
+    """
+    COCO 포맷 [x, y, w, h] → [x1, y1, x2, y2]로 변환합니다.
+    (torchvision FasterRCNN 등이 기대하는 형식)
+
+    Args:
+        boxes (Tensor): [N, 4] 형태, COCO 포맷
+
+    Returns:
+        Tensor: [N, 4] 형태, [x1, y1, x2, y2] 포맷
+    """
+    x, y, w, h = boxes.unbind(1)
+    return torch.stack([x, y, x + w, y + h], dim=1)
 
 
 def get_transform(train=True):
@@ -220,7 +246,7 @@ def get_transform(train=True):
         ])
 
 
-def get_dataloader(path, batch_size=4, train=True, shuffle=None, unique_only=True):
+def get_dataloader(path, batch_size=4, train=True, shuffle=None, unique_only=True, collate='stack'):
     """
     DataLoader를 생성합니다.
     
@@ -229,7 +255,9 @@ def get_dataloader(path, batch_size=4, train=True, shuffle=None, unique_only=Tru
         batch_size (int): 배치 크기
         train (bool): 학습용이면 True, 검증용이면 False
         shuffle (bool): 순서 섞기 (None이면 train 여부에 따라 자동 설정)
-    
+        unique_only (bool): 고유 이미지만 사용할지 여부
+        collate (str): 'list' 또는 'stack' - 배치 묶는 방식
+
     Returns:
         DataLoader
     """
@@ -239,16 +267,18 @@ def get_dataloader(path, batch_size=4, train=True, shuffle=None, unique_only=Tru
     transform = get_transform(train=train)
     dataset = PillDataset(path, transform=transform, unique_only=unique_only)
     
+    collate_func = collate_fn_stack if collate == 'stack' else collate_fn_list
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=0,       # Windows에서는 0으로 설정
-        collate_fn=collate_fn
+        collate_fn=collate_func
     )
 
 
-def collate_fn(batch):
+def collate_fn_stack(batch):
     """
     이미지마다 bbox 개수가 달라서 기본 collate가 안 되므로
     zip으로 묶은 뒤 targets를 리스트로 변환해서 반환합니다.
@@ -256,3 +286,11 @@ def collate_fn(batch):
     images, targets = zip(*batch)
     images = torch.stack(images, dim=0)
     return images, list(targets)
+
+
+def collate_fn_list(batch):
+    """
+    이미지를 리스트 형태로 유지합니다. (torchvision FasterRCNN 등 List[Tensor] 입력을 기대하는 모델용)
+    """
+    images, targets = zip(*batch)
+    return list(images), list(targets)
