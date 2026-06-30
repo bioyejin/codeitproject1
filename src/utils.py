@@ -1,5 +1,7 @@
 # src/utils.py
 import os
+import json
+import glob
 import random
 import numpy as np
 import torch
@@ -57,7 +59,6 @@ def plot_history(history, title='Training History', save_path=None):
     plt.tight_layout()
 
     if save_path:
-        import os
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path)
     plt.show()
@@ -84,7 +85,6 @@ def save_checkpoint(model, path):
         model: 저장할 모델
         path (str): 저장 경로
     """
-    import os
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(model.state_dict(), path)
 
@@ -115,9 +115,6 @@ def get_category_names(data_path):
     Returns:
         dict: {category_id: name}
     """
-    import json
-    import glob
-
     json_files = glob.glob(
         os.path.join(data_path, 'sprint_ai_project1_data', 'train_annotations', '**', '*.json'),
         recursive=True
