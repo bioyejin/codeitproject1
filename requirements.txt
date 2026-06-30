@@ -10,3 +10,4 @@ ipywidgets
 ipympl
 torchmetrics
 pyyaml
+pycocotools
