@@ -42,7 +42,7 @@ def plot_history(history, title='Training History', save_path=None):
 
     axes[1].plot(history['val_map'], marker='o', markersize=3, color='coral', label='mAP@0.5:0.95')
     axes[1].plot(history['val_map_50'], marker='o', markersize=3, color='seagreen', label='mAP@0.5')
-    axes[1].plot(history['val_map_75_95'], marker='o', markersize=3, color='purple', label='mAP@0.75:0.95 (선정 기준)')
+    axes[1].plot(history['val_map_75_95'], marker='o', markersize=3, color='purple', label='mAP@0.75:0.95 (selection metric)')
 
     best_epoch = int(np.argmax(history['val_map_75_95'])) + 1   # ← 기준 지표 변경
     best_val = max(history['val_map_75_95'])
@@ -57,6 +57,8 @@ def plot_history(history, title='Training History', save_path=None):
     plt.tight_layout()
 
     if save_path:
+        import os
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         plt.savefig(save_path)
     plt.show()
 
