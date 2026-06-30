@@ -6,17 +6,17 @@ data:
   collate: stack           # DETR 계열 → stack
 
 model:
-  name: swin_detr           # 또는 rt_detr, dino
+  name: rt_detr
   num_classes: 57
   pretrained: true
   freeze_backbone: true
-  box_format: coco          # DETR 계열은 모델 내부에서 변환 처리
+  box_format: xyxy          # torchvision RT-DETR은 FasterRCNN과 동일하게 xyxy 기대
 
 train:
-  epochs: 20
+  epochs: 100
   lr: 0.0001
   weight_decay: 0.0001
-  warmup_epochs: 0
+  warmup: true
   seed: 42
 
 output:
