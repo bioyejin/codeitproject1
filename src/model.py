@@ -100,8 +100,10 @@ class SwinDetrWrapper(nn.Module):
 
         # timm Swin-T 출력 형식: NHWC (B,H,W,C)
         # DETR의 input_projection(Conv2d)은 NCHW (B,C,H,W) 기대 → permute 래퍼로 변환
-        # self.model.model.backbone        = DetrConvEncoder
-        # self.model.model.backbone.model  = FeatureListNet (timm features_only 래퍼)
+        #
+        # transformers 버전별 timm 모델 경로가 다름:
+        #   5.x: backbone = DetrConvEncoder  → .model        = FeatureListNet
+        #   4.x: backbone = DetrConvModel    → .body.model   = FeatureListNet
         class _SwinExtractor(nn.Module):
             def __init__(self, m):
                 super().__init__()
@@ -109,11 +111,19 @@ class SwinDetrWrapper(nn.Module):
             def forward(self, x):
                 return [f.permute(0, 3, 1, 2).contiguous() for f in self.m(x)]
 
-        conv_encoder = self.model.model.backbone          # DetrConvEncoder
-        conv_encoder.model = _SwinExtractor(conv_encoder.model)
+        try:
+            # transformers 5.x: DetrConvEncoder 에는 .model 이 있음
+            container = self.model.model.backbone
+            feat_list = container.model
+            container.model = _SwinExtractor(feat_list)
+        except AttributeError:
+            # transformers 4.x: DetrConvModel 에는 .body (TimmBackbone) → .model
+            container = self.model.model.backbone.body
+            feat_list = container.model
+            container.model = _SwinExtractor(feat_list)
 
         if freeze_backbone:
-            for param in conv_encoder.model.m.parameters():
+            for param in feat_list.parameters():
                 param.requires_grad = False
 
     def _to_detr_targets(self, targets, H, W):
