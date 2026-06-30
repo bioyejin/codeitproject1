@@ -4,10 +4,14 @@ import os
 import json
 import glob
 
+from collections import defaultdict
+
+import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
-import torchvision.transforms as transforms
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 
 def download_data():
@@ -77,7 +81,7 @@ def apply_corrections(annotations, corrections_path='corrections.json', data_pat
                 for ann in annotations[file_name]:
                     if ann['bbox'] == original and ann['category_id'] == category_id:
                         ann['bbox'] = corrected
-                        print(f"✅ 수정 - ann_id {ann_id}: {original} → {corrected}")
+                        print(f"[OK] 수정 - ann_id {ann_id}: {original} -> {corrected}")
                         break
 
     # 2. bbox 추가
@@ -91,21 +95,21 @@ def apply_corrections(annotations, corrections_path='corrections.json', data_pat
             annotations[file_name].append(new_ann)
         else:
             annotations[file_name] = [new_ann]
-        print(f"✅ 추가 - {file_name}: {add['bbox']}")
+        print(f"[OK] 추가 - {file_name}: {add['bbox']}")
 
     return annotations
 
 
 class PillDataset(Dataset):
-    def __init__(self, path, transform=None, corrections_path='corrections.json', unique_only=True):
+    def __init__(self, path, train=True, corrections_path='corrections.json', unique_only=True):
         """
         Args:
             path (str): 데이터 루트 경로 (download_data()의 반환값)
-            transform: 이미지 증강/변환 (없으면 None)
+            train (bool): True면 학습용 transform, False면 검증용 transform 적용
             corrections_path (str): corrections.json 경로
         """
+        self.transform = get_transform(train)
         self.train_img_dir = os.path.join(path, 'sprint_ai_project1_data', 'train_images')
-        self.transform = transform
 
         # 이미지별 annotation 수집
         json_files = glob.glob(
@@ -133,7 +137,6 @@ class PillDataset(Dataset):
         # unique_only 적용
         if unique_only:
             # 파일명에서 구성 코드 추출 후 구성당 가장 낮은 위도 1장만 유지
-            from collections import defaultdict
             group_files = defaultdict(list)
             for file_name in self.annotations.keys():
                 group = '_'.join(file_name.split('_')[:5])
@@ -167,33 +170,33 @@ class PillDataset(Dataset):
     def __getitem__(self, idx):
         """
         idx번째 이미지와 annotation 반환합니다.
-        
+        albumentations transform을 이미지와 bbox에 함께 적용합니다.
+
         Returns:
             image (tensor): 이미지 텐서
-            target (dict): {'boxes': tensor, 'labels': tensor}
+            target (dict): {'boxes': tensor (COCO [x,y,w,h]), 'labels': tensor}
         """
         file_name = self.image_names[idx]
         img_path = os.path.join(self.train_img_dir, file_name)
-        
-        image = Image.open(img_path).convert('RGB')
-        
-        # bbox와 label을 텐서로 변환
-        boxes = torch.tensor(
-            [ann['bbox'] for ann in self.annotations[file_name]],
-            dtype=torch.float32
-        )
-        # category_id를 연속된 라벨로 변환
-        labels = torch.tensor(
-            [self.category_id_to_label[ann['category_id']] for ann in self.annotations[file_name]],
-            dtype=torch.int64
-        )
-        
-        target = {'boxes': boxes, 'labels': labels}
-        
-        if self.transform:
-            image = self.transform(image)
-        
-        return image, target
+
+        image = np.array(Image.open(img_path).convert('RGB'))
+
+        bboxes = [ann['bbox'] for ann in self.annotations[file_name]]
+        category_ids = [self.category_id_to_label[ann['category_id']] for ann in self.annotations[file_name]]
+
+        transformed = self.transform(image=image, bboxes=bboxes, category_ids=category_ids)
+        image = transformed['image']
+        bboxes = list(transformed['bboxes'])
+        category_ids = list(transformed['category_ids'])
+
+        if bboxes:
+            boxes = torch.tensor(bboxes, dtype=torch.float32)
+            labels = torch.tensor(category_ids, dtype=torch.int64)
+        else:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros(0, dtype=torch.int64)
+
+        return image, {'boxes': boxes, 'labels': labels}
 
 
 def coco_to_xyxy(boxes):
@@ -214,36 +217,34 @@ def coco_to_xyxy(boxes):
 def get_transform(train=True):
     """
     이미지 전처리 및 증강을 정의합니다.
-    
+    albumentations을 사용하여 이미지와 bbox를 함께 변환합니다.
+
     Args:
         train (bool): 학습용이면 True, 검증/테스트용이면 False
-    
+
     Returns:
-        transforms.Compose: 변환 파이프라인
+        A.Compose: bbox_params가 설정된 albumentations 파이프라인
     """
+    bbox_params = A.BboxParams(
+        format='coco',
+        label_fields=['category_ids'],
+        min_area=1,
+        min_visibility=0.1,
+    )
     if train:
-        return transforms.Compose([
-            transforms.Resize((640, 640)),       # 크기 통일
-            transforms.RandomHorizontalFlip(),   # 좌우 반전
-            transforms.ColorJitter(              # 밝기/대비 조정
-                brightness=0.2,
-                contrast=0.2
-            ),
-            transforms.ToTensor(),               # PIL → 텐서
-            transforms.Normalize(                # 정규화
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
+        return A.Compose([
+            A.Resize(640, 640),
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, p=0.5),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ], bbox_params=bbox_params)
     else:
-        return transforms.Compose([
-            transforms.Resize((640, 640)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
+        return A.Compose([
+            A.Resize(640, 640),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2(),
+        ], bbox_params=bbox_params)
 
 
 def get_dataloader(path, batch_size=4, train=True, shuffle=None, unique_only=True, collate='stack'):
@@ -262,10 +263,9 @@ def get_dataloader(path, batch_size=4, train=True, shuffle=None, unique_only=Tru
         DataLoader
     """
     if shuffle is None:
-        shuffle = train  # 학습용이면 shuffle, 검증용이면 안 함
-    
-    transform = get_transform(train=train)
-    dataset = PillDataset(path, transform=transform, unique_only=unique_only)
+        shuffle = train
+
+    dataset = PillDataset(path, train=train, unique_only=unique_only)
     
     collate_func = collate_fn_stack if collate == 'stack' else collate_fn_list
 
