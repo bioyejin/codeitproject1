@@ -109,11 +109,12 @@ class SwinDetrWrapper(nn.Module):
         extractor = _SwinExtractor(timm_backbone)
 
         # transformers 버전마다 내부 구조가 달라 경로 하드코딩이 불안정.
-        # named_modules()로 TimmBackbone을 동적 탐색하여 버전 무관하게 교체.
-        # (예: 구버전 backbone.model, 신버전 backbone.conv_encoder.model)
+        # named_modules()로 탐색: .model 속성을 가지고, 그 안에 strict_img_size가 있는 모듈
+        # = TimmBackbone (클래스명과 무관하게 동작)
         _replaced = False
         for _, mod in self.model.named_modules():
-            if 'Timm' in type(mod).__name__ and hasattr(mod, 'model'):
+            inner = getattr(mod, 'model', None)
+            if inner is not None and hasattr(inner, 'strict_img_size'):
                 mod.model = extractor
                 _replaced = True
                 break
