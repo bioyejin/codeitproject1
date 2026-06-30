@@ -10,7 +10,7 @@ model:
   num_classes: 57
   pretrained: true
   freeze_backbone: true
-  box_format: xyxy          # torchvision RT-DETR은 FasterRCNN과 동일하게 xyxy 기대
+  box_format: coco          # 래퍼 내부에서 COCO→정규화 cx,cy,w,h 변환 처리
 
 train:
   epochs: 100
