@@ -68,37 +68,40 @@ class SwinDetrWrapper(nn.Module):
         import timm as _timm
         from transformers import DetrConfig, DetrForObjectDetection
 
-        # DETR의 num_labels는 배경을 제외한 실제 객체 클래스 수 (no-object는 내부 처리)
         self._num_object_classes = num_classes - 1
 
-        # transformers 5.x의 TimmBackbone은 backbone_kwargs의 strict_img_size를
-        # timm.create_model에 전달하지 않아 640×640 입력 시 고정 크기 assertion 오류 발생.
-        # 해결: DETR 모델을 먼저 생성한 뒤 backbone.model을 직접 교체.
         config = DetrConfig(
             use_timm_backbone=True,
             backbone='swin_tiny_patch4_window7_224',
-            use_pretrained_backbone=False,   # 아래에서 timm 직접 로드
+            use_pretrained_backbone=pretrained,
             num_labels=self._num_object_classes,
             num_queries=num_queries,
             d_model=256,
             encoder_layers=num_encoder_layers,
             decoder_layers=num_decoder_layers,
-            backbone_kwargs={'out_indices': (3,)},  # intermediate_channel_sizes=[768] 설정용
-        )
-        self.model = DetrForObjectDetection(config)
-
-        # timm Swin-T를 올바른 설정으로 직접 생성
-        # strict_img_size=False: 640×640 입력 허용 (기본값 224 제한 해제)
-        # Swin-T 마지막 스테이지(3): 20×20×768 feature map (640 입력 기준)
-        timm_backbone = _timm.create_model(
-            'swin_tiny_patch4_window7_224',
-            pretrained=pretrained,
-            features_only=True,
-            out_indices=(3,),
-            strict_img_size=False,
+            backbone_kwargs={'out_indices': (3,)},
         )
 
-        # Swin-T timm 출력은 NHWC (B,H,W,C); DETR은 NCHW (B,C,H,W) 기대 → 래퍼로 변환
+        # transformers 5.x 버그: backbone_kwargs가 timm.create_model에 전달되지 않음.
+        # DETR 초기화 전 timm.create_model을 monkey-patch해서 두 인자를 직접 주입:
+        #   strict_img_size=False  → 224 고정 크기 assertion 해제 (640×640 허용)
+        #   dynamic_img_pad=True   → 640/4=160 패치, 160%7≠0 이므로 window_size(7) 배수로 자동 패딩
+        _orig_create = _timm.create_model
+        def _patched_create(name, **kwargs):
+            if 'swin_tiny' in name.lower():
+                kwargs['strict_img_size'] = False
+                kwargs['dynamic_img_pad'] = True
+            return _orig_create(name, **kwargs)
+        _timm.create_model = _patched_create
+        try:
+            self.model = DetrForObjectDetection(config)
+        finally:
+            _timm.create_model = _orig_create
+
+        # timm Swin-T 출력 형식: NHWC (B,H,W,C)
+        # DETR의 input_projection(Conv2d)은 NCHW (B,C,H,W) 기대 → permute 래퍼로 변환
+        # self.model.model.backbone        = DetrConvEncoder
+        # self.model.model.backbone.model  = FeatureListNet (timm features_only 래퍼)
         class _SwinExtractor(nn.Module):
             def __init__(self, m):
                 super().__init__()
@@ -106,23 +109,11 @@ class SwinDetrWrapper(nn.Module):
             def forward(self, x):
                 return [f.permute(0, 3, 1, 2).contiguous() for f in self.m(x)]
 
-        extractor = _SwinExtractor(timm_backbone)
-
-        # transformers 버전마다 내부 구조가 달라 경로 하드코딩이 불안정.
-        # named_modules()로 탐색: .model 속성을 가지고, 그 안에 strict_img_size가 있는 모듈
-        # = TimmBackbone (클래스명과 무관하게 동작)
-        _replaced = False
-        for _, mod in self.model.named_modules():
-            inner = getattr(mod, 'model', None)
-            if inner is not None and hasattr(inner, 'strict_img_size'):
-                mod.model = extractor
-                _replaced = True
-                break
-        if not _replaced:
-            raise RuntimeError("TimmBackbone을 찾지 못했습니다. transformers 버전을 확인하세요.")
+        conv_encoder = self.model.model.backbone          # DetrConvEncoder
+        conv_encoder.model = _SwinExtractor(conv_encoder.model)
 
         if freeze_backbone:
-            for param in extractor.m.parameters():
+            for param in conv_encoder.model.m.parameters():
                 param.requires_grad = False
 
     def _to_detr_targets(self, targets, H, W):
