@@ -12,3 +12,5 @@ torchmetrics
 pyyaml
 pycocotools
 albumentations
+transformers
+timm
