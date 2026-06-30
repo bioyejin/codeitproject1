@@ -106,10 +106,22 @@ class SwinDetrWrapper(nn.Module):
             def forward(self, x):
                 return [f.permute(0, 3, 1, 2).contiguous() for f in self.m(x)]
 
-        self.model.model.backbone.model = _SwinExtractor(timm_backbone)
+        extractor = _SwinExtractor(timm_backbone)
+
+        # transformers 버전마다 내부 구조가 달라 경로 하드코딩이 불안정.
+        # named_modules()로 TimmBackbone을 동적 탐색하여 버전 무관하게 교체.
+        # (예: 구버전 backbone.model, 신버전 backbone.conv_encoder.model)
+        _replaced = False
+        for _, mod in self.model.named_modules():
+            if 'Timm' in type(mod).__name__ and hasattr(mod, 'model'):
+                mod.model = extractor
+                _replaced = True
+                break
+        if not _replaced:
+            raise RuntimeError("TimmBackbone을 찾지 못했습니다. transformers 버전을 확인하세요.")
 
         if freeze_backbone:
-            for param in self.model.model.backbone.model.m.parameters():
+            for param in extractor.m.parameters():
                 param.requires_grad = False
 
     def _to_detr_targets(self, targets, H, W):
