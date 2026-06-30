@@ -10,6 +10,7 @@ model:
   num_classes: 57
   pretrained: true
   freeze_backbone: true
+  box_format: coco          # DETR 계열은 모델 내부에서 변환 처리
 
 train:
   epochs: 20
