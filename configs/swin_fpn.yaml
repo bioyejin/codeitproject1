@@ -10,6 +10,7 @@ model:
   num_classes: 57
   pretrained: true
   freeze_backbone: true
+  box_format: xyxy    # FasterRCNN 계열은 xyxy, DETR 계열은 추후 별도 형식
 
 train:
   epochs: 20
