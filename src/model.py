@@ -65,7 +65,6 @@ class SwinDetrWrapper(nn.Module):
     def __init__(self, num_classes, pretrained=True, freeze_backbone=True,
                  num_queries=100, num_encoder_layers=6, num_decoder_layers=6):
         super().__init__()
-        import timm as _timm
         from transformers import DetrConfig, DetrForObjectDetection
 
         self._num_object_classes = num_classes - 1
@@ -82,27 +81,42 @@ class SwinDetrWrapper(nn.Module):
             backbone_kwargs={'out_indices': (3,)},
         )
 
-        # transformers 5.x 버그: backbone_kwargs가 timm.create_model에 전달되지 않음.
-        # DETR 초기화 전 timm.create_model을 monkey-patch해서 두 인자를 직접 주입:
-        #   strict_img_size=False  → 224 고정 크기 assertion 해제 (640×640 허용)
-        #   dynamic_img_pad=True   → 640/4=160 패치, 160%7≠0 이므로 window_size(7) 배수로 자동 패딩
+        # timm.create_model에 strict_img_size=False, dynamic_img_pad=True 주입:
+        #   strict_img_size=False → 224 고정 크기 assertion 해제 (640×640 허용)
+        #   dynamic_img_pad=True  → SwinTransformerBlock이 window_size(7) 배수로 feature map 패딩
+        #
+        # 주의: transformers 일부 버전은 'from timm import create_model'으로 이미 바인딩하므로
+        # timm.create_model만 패치해서는 그 참조에 적용되지 않음.
+        # → sys.modules에 로드된 transformers 모듈들의 create_model 참조도 함께 교체.
+        import timm as _timm, sys as _sys
+
         _orig_create = _timm.create_model
+
         def _patched_create(name, **kwargs):
-            if 'swin_tiny' in name.lower():
-                kwargs['strict_img_size'] = False
-                kwargs['dynamic_img_pad'] = True
+            if 'swin' in name.lower():
+                kwargs.setdefault('strict_img_size', False)
+                kwargs.setdefault('dynamic_img_pad', True)
             return _orig_create(name, **kwargs)
+
         _timm.create_model = _patched_create
+        _patched_mods = {}
+        for _mname, _mobj in list(_sys.modules.items()):
+            if 'transformers' in _mname and getattr(_mobj, 'create_model', None) is _orig_create:
+                _patched_mods[_mname] = _mobj
+                setattr(_mobj, 'create_model', _patched_create)
+
         try:
             self.model = DetrForObjectDetection(config)
         finally:
             _timm.create_model = _orig_create
+            for _mname, _mobj in _patched_mods.items():
+                if getattr(_mobj, 'create_model', None) is _patched_create:
+                    setattr(_mobj, 'create_model', _orig_create)
 
+        # Fix 2: NHWC → NCHW 래퍼
         # timm Swin-T 출력 형식: NHWC (B,H,W,C)
-        # DETR의 input_projection(Conv2d)은 NCHW (B,C,H,W) 기대 → permute 래퍼로 변환
-        #
-        # transformers 버전마다 FeatureListNet 경로가 다르므로 경로 하드코딩 대신
-        # timm 1.0+ 의 output_fmt=NHWC 속성으로 FeatureListNet을 직접 탐색해 교체.
+        # DETR의 input_projection(Conv2d)은 NCHW (B,C,H,W) 기대 → permute 래퍼로 교체.
+        # output_fmt=NHWC 속성으로 탐색하므로 transformers 버전(4.x/5.0/5.x)에 무관하게 동작.
         class _SwinExtractor(nn.Module):
             def __init__(self, m):
                 super().__init__()
