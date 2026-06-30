@@ -11,3 +11,4 @@ ipympl
 torchmetrics
 pyyaml
 pycocotools
+albumentations
