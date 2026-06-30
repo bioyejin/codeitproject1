@@ -42,9 +42,50 @@ project/
 ```
 data/
 ├── train_images/       # 훈련 이미지 (PNG, 232개)
-├── train_annotations/  # 훈련 annotation (COCO JSON, 114개)
+├── train_annotations/  # 훈련 annotation (COCO JSON, 763개)
 └── test_images/        # 테스트 이미지 (PNG, 842개)
 ```
+
+또는 코드에서 자동 다운로드:
+
+```python
+from src.dataset import download_data
+path = download_data()  # Kaggle 캐시에 자동 저장
+```
+
+---
+
+## 데이터 분석 (EDA) 요약
+
+### 데이터 구성
+
+| 항목 | 수량 |
+|---|---|
+| 전체 이미지 | 232장 |
+| 고유 이미지 (학습 사용) | 114장 |
+| 테스트 이미지 | 842장 |
+| 클래스 수 | 56종 |
+| 전체 bbox | 763개 |
+| 이미지당 평균 알약 수 | 3.3개 |
+
+### 주요 발견
+
+- **촬영 조건**: 같은 구성의 알약을 카메라 위도 70°/75°/90°로 각각 촬영하여 중복 이미지 존재
+- **고유 이미지 사용**: 같은 구성의 알약을 여러 각도로 촬영한 중복 이미지 제거 → `unique_only=True` 옵션으로 구성당 가장 낮은 위도 이미지 1장만 사용 (114장)
+- **클래스 불균형**: 최다 클래스 157개 ~ 최소 클래스 3개로 편차 큼
+- **데이터 누수 방지**: 고유 이미지 114장을 구성 단위 Group K-Fold로 train/val 분리
+
+---
+
+## Annotation 수정 내역
+
+원본 데이터의 annotation 오류를 수정한 내역이 `corrections.json`에 기록되어 있습니다.  
+`PillDataset` 로드 시 자동으로 적용됩니다.
+
+| 유형 | 건수 |
+|---|---|
+| bbox 좌표 오류 수정 | 6건 |
+| 누락 bbox 추가 | 8건 |
 
 ---
 
