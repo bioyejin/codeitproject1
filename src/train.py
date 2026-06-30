@@ -24,6 +24,7 @@ def prepare_targets(targets, device, box_format):
 
 from src.model import get_model
 from src.utils import get_groups, set_seed, save_checkpoint, plot_history, load_checkpoint, get_category_names
+from src.visualize import collect_predictions, visualize_errors_from_data
 
 
 def load_data(unique_only=True, batch_size=4, collate='stack', seed=42):
@@ -342,6 +343,42 @@ def train_model(model, train_loader, val_loader, optimizer, warmup_scheduler, ma
     return history
 
 
+def evaluate_from_data(all_data, device):
+    """
+    collect_predictions()으로 수집한 데이터로 mAP를 계산합니다 (추론 없음).
+    evaluate()와 동일한 결과를 반환하지만 모델을 다시 실행하지 않습니다.
+
+    Args:
+        all_data: collect_predictions()의 반환값
+        device: 'cuda' or 'cpu'
+
+    Returns:
+        dict: {'map', 'map_50', 'map_75_95', 'map_per_class', 'classes'}
+    """
+    metric_standard = MeanAveragePrecision(class_metrics=True)
+    metric_strict = MeanAveragePrecision(iou_thresholds=[0.75, 0.80, 0.85, 0.90, 0.95])
+
+    for data in all_data:
+        metric_targets = [{'boxes':  data['gt_boxes'].to(device),
+                           'labels': data['gt_labels'].to(device)}]
+        preds = [{'boxes':  data['pred_boxes'].to(device),
+                  'labels': data['pred_labels'].to(device),
+                  'scores': data['pred_scores'].to(device)}]
+        metric_standard.update(preds, metric_targets)
+        metric_strict.update(preds, metric_targets)
+
+    result_standard = metric_standard.compute()
+    result_strict   = metric_strict.compute()
+
+    return {
+        'map':           result_standard['map'].item(),
+        'map_50':        result_standard['map_50'].item(),
+        'map_per_class': result_standard.get('map_per_class'),
+        'classes':       result_standard.get('classes'),
+        'map_75_95':     result_strict['map'].item(),
+    }
+
+
 def load_config(path):
     with open(path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f)
@@ -421,15 +458,21 @@ def run_kfold(config_path, max_folds=None, override_epochs=None):
         ).to(device)
         best_model = load_checkpoint(best_model, save_path, device=device)
 
-        per_class_result = evaluate(best_model, val_loader, device)
+        # best model 추론 1회 실행 → mAP 계산 + 시각화에 공유
+        pred_data = collect_predictions(best_model, val_loader, device)
+
+        per_class_result = evaluate_from_data(pred_data, device)
 
         print(f"\n[Fold {fold+1}] 클래스별 mAP (best epoch 기준)")
         for cls, ap in zip(per_class_result['classes'], per_class_result['map_per_class']):
-            label = cls.item()         # 모델 출력 라벨 (1~56)
-            cat_id = label_to_category_id.get(label)      # 라벨 → 원본 category_id(dl_idx)
+            label = cls.item()
+            cat_id = label_to_category_id.get(label)
             cls_name = category_map.get(cat_id, '?') if cat_id is not None else '?'
             cls_name = cls_name.replace('\xa0', ' ')
             print(f"  {cls_name}({cat_id}): {ap.item():.4f}")
+
+        vis_dir = os.path.join(config['output']['save_dir'], f"{model_name}_fold{fold+1}_errors")
+        visualize_errors_from_data(pred_data, label_to_category_id, save_dir=vis_dir)
 
         best_map_75_95 = max(history['val_map_75_95'])
         all_fold_results.append(best_map_75_95)
