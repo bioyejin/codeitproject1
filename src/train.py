@@ -519,6 +519,7 @@ def run_kfold_from_dir(dataset_dir, config_path, max_folds=None, override_epochs
     n_folds = min(max_folds, n_splits) if max_folds is not None else n_splits
 
     all_fold_results = []
+    all_per_class    = []   # fold별 {label: ap} 딕셔너리 리스트
 
     for fold in range(n_folds):
         print(f"\n{'='*50}\nFold {fold+1}/{n_folds} 시작 ({model_name})\n{'='*50}")
@@ -574,10 +575,14 @@ def run_kfold_from_dir(dataset_dir, config_path, max_folds=None, override_epochs
         per_class_result = evaluate_from_data(pred_data, device)
 
         print(f"\n[Fold {fold+1}] 클래스별 mAP (best epoch 기준)")
+        fold_class_ap = {}
         for cls, ap in zip(per_class_result['classes'], per_class_result['map_per_class']):
             label = cls.item()
             cat_id = label_to_category_id.get(label, '?')
-            print(f"  category {cat_id}: {ap.item():.4f}")
+            ap_val = ap.item()
+            fold_class_ap[label] = ap_val
+            print(f"  category {cat_id}: {ap_val:.4f}")
+        all_per_class.append(fold_class_ap)
 
         vis_dir = os.path.join(config['output']['save_dir'], f"{model_name}_fold{fold+1}_errors")
         visualize_errors_from_data(pred_data, label_to_category_id, save_dir=vis_dir)
@@ -590,7 +595,7 @@ def run_kfold_from_dir(dataset_dir, config_path, max_folds=None, override_epochs
     std_map = np.std(all_fold_results)
     print(f"\n{'='*50}\n{model_name} 최종 결과 ({n_folds}-fold 평균)\nmAP@0.75:0.95: {avg_map:.4f} ± {std_map:.4f}\n{'='*50}")
 
-    return all_fold_results
+    return {'fold_results': all_fold_results, 'per_class': all_per_class}
 
 
 if __name__ == '__main__':
