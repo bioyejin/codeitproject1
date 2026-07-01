@@ -199,6 +199,73 @@ class PillDataset(Dataset):
         return image, {'boxes': boxes, 'labels': labels}
 
 
+class FoldDataset(Dataset):
+    """
+    Pre-split fold 디렉토리에서 데이터를 로드합니다 (Colab + Google Drive 워크플로우용).
+    dataset_dir/fold{i}/{split}/_annotations.coco.json + PNG 이미지를 읽습니다.
+    카테고리 라벨은 zip 생성 시 이미 1-indexed로 저장되어 PillDataset과 동일한 출력 형식을 가집니다.
+
+    Args:
+        fold_split_dir: '/content/dataset/fold0/train' 또는 '/content/dataset/fold0/valid'
+        train: True면 학습용 transform, False면 검증용 transform 적용
+    """
+
+    def __init__(self, fold_split_dir, train=True):
+        self.img_dir = fold_split_dir
+        self.transform = get_transform(train)
+
+        ann_path = os.path.join(fold_split_dir, '_annotations.coco.json')
+        with open(ann_path, 'r', encoding='utf-8') as f:
+            coco = json.load(f)
+
+        # label(1-indexed) → original category_id
+        self.label_to_category_id = {
+            cat['id']: int(cat['name'])
+            for cat in coco['categories']
+            if cat['id'] > 0
+        }
+
+        ann_by_image = defaultdict(list)
+        for ann in coco['annotations']:
+            ann_by_image[ann['image_id']].append(ann)
+
+        self.samples = []
+        self.image_names = []
+        for img in coco['images']:
+            anns = ann_by_image[img['id']]
+            self.samples.append({
+                'file_name': img['file_name'],
+                'boxes':  [a['bbox'] for a in anns],
+                'labels': [a['category_id'] for a in anns],  # 이미 1-indexed
+            })
+            self.image_names.append(img['file_name'])
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        img_path = os.path.join(self.img_dir, sample['file_name'])
+        image = np.array(Image.open(img_path).convert('RGB'))
+
+        bboxes = sample['boxes']
+        category_ids = sample['labels']
+
+        transformed = self.transform(image=image, bboxes=bboxes, category_ids=category_ids)
+        image = transformed['image']
+        bboxes = list(transformed['bboxes'])
+        category_ids = list(transformed['category_ids'])
+
+        if bboxes:
+            boxes = torch.tensor(bboxes, dtype=torch.float32)
+            labels = torch.tensor(category_ids, dtype=torch.int64)
+        else:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros(0, dtype=torch.int64)
+
+        return image, {'boxes': boxes, 'labels': labels}
+
+
 def coco_to_xyxy(boxes):
     """
     COCO 포맷 [x, y, w, h] → [x1, y1, x2, y2]로 변환합니다.
