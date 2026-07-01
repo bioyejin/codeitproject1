@@ -1,16 +1,17 @@
 # src/train.py
 import os
+import json
 import yaml
 import numpy as np
 import torch
 import random
-from torch.utils.data import Subset
+from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR
 from sklearn.model_selection import GroupKFold
 from tqdm import tqdm
 from torchmetrics.detection import MeanAveragePrecision
 
-from src.dataset import download_data, PillDataset, collate_fn_list, collate_fn_stack, coco_to_xyxy
+from src.dataset import download_data, PillDataset, FoldDataset, collate_fn_list, collate_fn_stack, coco_to_xyxy
 
 def prepare_targets(targets, device, box_format):
     """targets를 device로 이동하고, box_format에 따라 bbox를 변환합니다."""
@@ -481,6 +482,113 @@ def run_kfold(config_path, max_folds=None, override_epochs=None):
     avg_map = np.mean(all_fold_results)
     std_map = np.std(all_fold_results)
     print(f"\n{'='*50}\n{model_name} 최종 결과 (5-fold 평균)\nmAP@0.75:0.95: {avg_map:.4f} ± {std_map:.4f}\n{'='*50}")
+
+    return all_fold_results
+
+
+def run_kfold_from_dir(dataset_dir, config_path, max_folds=None, override_epochs=None):
+    """
+    Pre-split fold 디렉토리에서 K-Fold 학습 (Colab + Google Drive 워크플로우용).
+    dataset_dir/fold{i}/train·valid/_annotations.coco.json 구조를 사용합니다.
+
+    Args:
+        dataset_dir (str): unzip된 dataset 루트 경로 (예: '/content/dataset')
+        config_path (str): config yaml 경로
+        max_folds (int): 실행할 최대 fold 수 (None이면 전체, sanity check용)
+        override_epochs (int): config epochs 덮어쓰기 (sanity check용)
+
+    Returns:
+        list: 각 fold의 Best mAP@0.75:0.95 리스트
+    """
+    config = load_config(config_path)
+    if override_epochs is not None:
+        config['train']['epochs'] = override_epochs
+    set_seed(config['train']['seed'])
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"device: {device}")
+
+    with open(os.path.join(dataset_dir, 'label_map.json'), 'r') as f:
+        label_map = json.load(f)
+    label_to_category_id = {int(k): v for k, v in label_map['label2cat'].items()}
+
+    model_name = config['model']['name']
+    collate_func = collate_fn_list if config['data']['collate'] == 'list' else collate_fn_stack
+    batch_size = config['data']['batch_size']
+    n_splits = config['data']['n_splits']
+    n_folds = min(max_folds, n_splits) if max_folds is not None else n_splits
+
+    all_fold_results = []
+
+    for fold in range(n_folds):
+        print(f"\n{'='*50}\nFold {fold+1}/{n_folds} 시작 ({model_name})\n{'='*50}")
+
+        train_dir = os.path.join(dataset_dir, f'fold{fold}', 'train')
+        valid_dir = os.path.join(dataset_dir, f'fold{fold}', 'valid')
+
+        train_dataset = FoldDataset(train_dir, train=True)
+        val_dataset   = FoldDataset(valid_dir, train=False)
+        print(f"train: {len(train_dataset)}장, val: {len(val_dataset)}장")
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                                  num_workers=2, collate_fn=collate_func)
+        val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False,
+                                  num_workers=2, collate_fn=collate_func)
+
+        model = get_model(
+            model_name,
+            num_classes=config['model']['num_classes'],
+            pretrained=config['model']['pretrained'],
+            freeze_backbone=config['model']['freeze_backbone']
+        ).to(device)
+
+        optimizer, warmup_scheduler, main_scheduler = get_optimizer_and_scheduler(
+            model,
+            lr=config['train']['lr'],
+            weight_decay=config['train']['weight_decay'],
+            warmup=config['train']['warmup'],
+            total_epochs=config['train']['epochs'],
+            steps_per_epoch=len(train_loader)
+        )
+
+        save_path = os.path.join(config['output']['save_dir'], f"{model_name}_fold{fold+1}.pt")
+
+        history = train_model(
+            model, train_loader, val_loader, optimizer, warmup_scheduler, main_scheduler,
+            device, epochs=config['train']['epochs'], save_path=save_path,
+            box_format=config['model']['box_format']
+        )
+
+        plot_history(history, title=f"{model_name} - Fold {fold+1}",
+                     save_path=os.path.join(config['output']['save_dir'], f"{model_name}_fold{fold+1}_history.png"))
+
+        best_model = get_model(
+            model_name,
+            num_classes=config['model']['num_classes'],
+            pretrained=False,
+            freeze_backbone=config['model']['freeze_backbone']
+        ).to(device)
+        best_model = load_checkpoint(best_model, save_path, device=device)
+
+        pred_data = collect_predictions(best_model, val_loader, device)
+        per_class_result = evaluate_from_data(pred_data, device)
+
+        print(f"\n[Fold {fold+1}] 클래스별 mAP (best epoch 기준)")
+        for cls, ap in zip(per_class_result['classes'], per_class_result['map_per_class']):
+            label = cls.item()
+            cat_id = label_to_category_id.get(label, '?')
+            print(f"  category {cat_id}: {ap.item():.4f}")
+
+        vis_dir = os.path.join(config['output']['save_dir'], f"{model_name}_fold{fold+1}_errors")
+        visualize_errors_from_data(pred_data, label_to_category_id, save_dir=vis_dir)
+
+        best_map_75_95 = max(history['val_map_75_95'])
+        all_fold_results.append(best_map_75_95)
+        print(f"Fold {fold+1} 완료 | Best mAP@0.75:0.95: {best_map_75_95:.4f}")
+
+    avg_map = np.mean(all_fold_results)
+    std_map = np.std(all_fold_results)
+    print(f"\n{'='*50}\n{model_name} 최종 결과 ({n_folds}-fold 평균)\nmAP@0.75:0.95: {avg_map:.4f} ± {std_map:.4f}\n{'='*50}")
 
     return all_fold_results
 
