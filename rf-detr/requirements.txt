@@ -1,0 +1,15 @@
+# rf-detr/requirements.txt
+# 이 폴더(dataset.py/model.py/train.py/utils.py/visualize.py/colab_setup.py/plus.py)가
+# 실제로 import하는 모듈 기준으로 작성함. Colab 런타임에 이미 내장된 google.colab은
+# pip으로 따로 설치할 수 없어 제외함 (colab_setup.mount_drive()는 Colab 안에서만 동작).
+
+rfdetr[train,loggers]
+torch
+torchvision
+torchmetrics
+numpy
+scikit-learn
+pillow
+matplotlib
+pandas
+pyyaml

@@ -1,0 +1,39 @@
+# rf-detr/config.yaml
+data:
+  # 드라이브에서 sprint_ai_project1_data를 찾을 후보 경로 (순서대로 탐색)
+  data_root_candidates:
+    - /content/drive/MyDrive/1팀 공유 문서/ai12-level1-project/sprint_ai_project1_data
+    - /content/drive/MyDrive/ai12-level1-project/sprint_ai_project1_data
+  search_root: /content/drive/MyDrive   # 후보에 없을 때 재귀 검색할 루트
+  corrections_path: corrections.json    # rf-detr 폴더 기준 상대경로 (cwd=rf-detr일 때)
+  cache_dir: /content/img_cache
+  dataset_dir: /content/dataset
+  archive_name: dataset_5fold           # {PROJ_ROOT}/{archive_name}.zip 로 저장
+  n_splits: 5
+  seed: 42
+
+model:
+  variant: small        # nano | small | medium | base | large
+  tag: small_res512     # 실험명 태그 (체크포인트 파일명에 사용)
+
+train:
+  seed: 42              # model.train(seed=...)로 전달 - RF-DETR 학습 재현성 고정 (TrainConfig.seed 확인됨)
+  epochs: 100
+  batch_size: 8
+  grad_accum_steps: 2
+  lr: 0.0001
+  lr_encoder: 0.00015
+  weight_decay: 0.0001
+  lr_scheduler: cosine
+  warmup_epochs: 0.0
+  lr_min_factor: 0.0
+  early_stopping: true
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.001
+  tensorboard: true
+
+output:
+  local_output_dir: /content/outputs   # fold별 학습 임시 산출물 (Colab 로컬)
+  # best 체크포인트 백업 위치. prepare_data() 실행 시 콘솔에 PROJ_ROOT/outputs 예시가
+  # 출력되니, 확인 후 실제 경로로 채워넣을 것.
+  backup_dir: /content/drive/MyDrive/ai12-level1-project/outputs
