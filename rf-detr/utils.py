@@ -73,8 +73,7 @@ def plot_history(history, title='Training History', save_path=None):
 
     axes[1].plot(history['val_map'], marker='o', markersize=3, color='coral', label='mAP@0.5:0.95')
     axes[1].plot(history['val_map_50'], marker='o', markersize=3, color='seagreen', label='mAP@0.5')
-    axes[1].plot(history['val_map_75'], marker='o', markersize=3, color='purple',
-                 label='mAP@0.75 (RF-DETR native, 참고용 - 다른 모델의 0.75:0.95 평균과 다른 지표)')
+    axes[1].plot(history['val_map_75'], marker='o', markersize=3, color='purple', label='mAP@0.75')
 
     best_epoch = int(np.argmax(history['val_map_75'])) + 1
     axes[1].axvline(x=best_epoch - 1, color='gray', linestyle='--', label=f'Best epoch {best_epoch}')
